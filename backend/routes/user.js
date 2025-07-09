@@ -155,5 +155,3 @@ router.delete('/:id', verifyToken, getUser, async (req, res) => {
 });
 
 export default router;
-
-// Admin should create users via a dedicated auth route, not this one.

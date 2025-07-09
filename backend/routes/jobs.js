@@ -229,5 +229,3 @@ router.patch('/:id/view', getJob, async (req, res) => {
 });
 
 export default router;
-
-// viewscount can't be updated by client and profile deletion for company can be handled by companyowner 

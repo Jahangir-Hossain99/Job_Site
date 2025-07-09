@@ -1,10 +1,12 @@
 // models/Job.js
 import mongoose from 'mongoose';
+// No need to import Application here, we'll use this.model('Application')
 
 const jobSchema = new mongoose.Schema({
+    // ... (existing schema properties) ...
     company: {
         type: mongoose.Schema.Types.ObjectId,
-        ref: 'Company', // Reference to the Company document that posted this job
+        ref: 'Company',
         required: true,
         index: true
     },
@@ -70,7 +72,15 @@ const jobSchema = new mongoose.Schema({
     isFlagged: { type: Boolean, default: false },
     flagReason: { type: String },
 }, {
-    timestamps: true // createdAt and updatedAt fields
+    timestamps: true
+});
+
+// --- NEW: Pre-delete hook for cascading deletes ---
+jobSchema.pre('deleteOne', { document: true, query: false }, async function(next) {
+    console.log(`Deleting all applications for job: ${this._id}`);
+    // Delete all applications submitted for this job
+    await this.model('Application').deleteMany({ job: this._id });
+    next();
 });
 
 export default mongoose.model('Job', jobSchema);

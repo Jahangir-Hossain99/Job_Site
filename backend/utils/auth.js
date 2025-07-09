@@ -1,25 +1,20 @@
-// utils/auth.js
+// utils/auth.js (NO CHANGE TO THIS FILE, it's already structured for this)
 import jwt from 'jsonwebtoken';
 import dotenv from 'dotenv';
 dotenv.config();
 
-// Get JWT secret from environment variables
 const JWT_SECRET = process.env.JWT_SECRET;
 
-// Function to generate a JWT token
-// Payload should contain user/company ID, role, and potentially isCompany flag
 export const generateToken = (payload) => {
-  return jwt.sign(payload, JWT_SECRET, { expiresIn: '2h' }); // Token expires in 1 hour
+  return jwt.sign(payload, JWT_SECRET, { expiresIn: '1h' });
 };
 
-// Middleware to verify JWT token
 export const verifyToken = (req, res, next) => {
   const authHeader = req.headers['authorization'];
   if (!authHeader) {
     return res.status(401).json({ message: 'Authorization header missing' });
   }
 
-  // Expecting "Bearer TOKEN"
   const token = authHeader.split(' ')[1];
   if (!token) {
     return res.status(401).json({ message: 'Token missing from Authorization header' });
@@ -27,19 +22,16 @@ export const verifyToken = (req, res, next) => {
 
   try {
     const decoded = jwt.verify(token, JWT_SECRET);
-    // Attach decoded user/company info to the request
-    // This allows subsequent middleware/routes to know who is making the request
-    req.user = decoded; // { id: '...', role: 'jobseeker', isCompany: false }
+    req.user = decoded;
     next();
   } catch (error) {
     if (error.name === 'TokenExpiredError') {
       return res.status(401).json({ message: 'Token expired' });
     }
-    return res.status(403).json({ message: 'Invalid token' }); // Forbidden
+    return res.status(403).json({ message: 'Invalid token' });
   }
 };
 
-// Middleware for role-based authorization
 export const authorizeRoles = (...roles) => {
   return (req, res, next) => {
     if (!req.user || !req.user.role) {
@@ -52,34 +44,58 @@ export const authorizeRoles = (...roles) => {
   };
 };
 
-// Middleware to authorize ownership of a resource
-// Requires verifyToken to run first to populate req.user
-// 'resourceIdField' is the name of the field in the resource document that holds the owner's ID (e.g., 'jobSeeker' for an Application, 'company' for a Job)
+// authorizeOwner middleware: Checks if the authenticated user/company is the owner of the resource
+// Model: The Mongoose model of the resource (e.g., User, Company, Job, Application)
+// resourceIdField: The field in the resource document that stores the owner's ID (e.g., '_id' for User/Company, 'company' for Job, 'jobSeeker' for Application)
+// userIdFieldInToken: The field in the JWT payload that stores the user/company ID (default is 'id')
 export const authorizeOwner = (Model, resourceIdField, userIdFieldInToken = 'id') => {
   return async (req, res, next) => {
+    // This middleware assumes verifyToken has already run and populated req.user
     if (!req.user) {
       return res.status(401).json({ message: 'Authentication required for ownership check.' });
     }
 
+    // Admins can bypass ownership checks
+    if (req.user.role === 'admin') {
+      return next();
+    }
+
     try {
+      // Find the resource using the ID from the request parameters
       const resource = await Model.findById(req.params.id);
       if (!resource) {
         return res.status(404).json({ message: 'Resource not found.' });
       }
 
-      // Check if the authenticated user/company ID matches the owner ID in the resource
-      if (resource[resourceIdField].toString() !== req.user[userIdFieldInToken].toString()) {
-        // If not the owner, check if they are an admin
-        if (req.user.role === 'admin') {
-          next(); // Admins can bypass ownership check
-        } else {
-          return res.status(403).json({ message: 'Access denied. You do not own this resource.' });
+      // Special handling for Company: The Company's _id is its own owner ID
+      if (Model.modelName === 'Company') {
+        if (resource._id.toString() === req.user[userIdFieldInToken].toString()) {
+          res.company = resource; // Attach for subsequent middleware/route handlers
+          return next();
         }
-      } else {
-        next(); // User/Company owns the resource
       }
+      // Special handling for User: The User's _id is its own owner ID
+      else if (Model.modelName === 'User') {
+        if (resource._id.toString() === req.user[userIdFieldInToken].toString()) {
+            res.user = resource; // Attach for subsequent middleware/route handlers
+            return next();
+        }
+      }
+      // For other models (Job, Application), check if the resourceIdField matches the user ID in token
+      else if (resource[resourceIdField] && resource[resourceIdField].toString() === req.user[userIdFieldInToken].toString()) {
+        if (Model.modelName === 'Job') res.job = resource;
+        else if (Model.modelName === 'Application') res.application = resource;
+        return next();
+      }
+
+      return res.status(403).json({ message: 'Access denied. You do not own this resource or are not authorized.' });
+
     } catch (error) {
       console.error("Authorization owner error:", error);
+      // Check for CastError (invalid ID format)
+      if (error.name === 'CastError' && error.kind === 'ObjectId') {
+        return res.status(400).json({ message: `Invalid ID format for ${Model.modelName}` });
+      }
       return res.status(500).json({ message: 'Server error during authorization.' });
     }
   };

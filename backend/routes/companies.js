@@ -1,8 +1,8 @@
 // routes/companies.js
 import express from 'express';
 const router = express.Router();
-import Company from '../models/Company.js'; // Ensure the correct path and .js extension
-import { verifyToken, authorizeRoles, authorizeOwner } from '../utils/auth.js'; // Import auth middleware
+import Company from '../models/Company.js';
+import { verifyToken, authorizeRoles } from '../utils/auth.js'; // Import auth middleware
 import mongoose from 'mongoose'; // For ObjectId validation
 
 // Middleware to get a single company by ID
@@ -20,8 +20,8 @@ async function getCompany(req, res, next) {
     return res.status(500).json({ message: err.message });
   }
 
-  res.company = company; // Attach the found company to the response object
-  next(); // Move to the next middleware or route handler
+  res.company = company;
+  next();
 }
 
 // Helper for consistent Mongoose validation/duplicate error handling
@@ -47,34 +47,26 @@ const handleMongooseError = (res, err) => {
 
 // --- ROUTES ---
 
-// GET all companies (Admin only, or could be public for Browse)
-// Making it admin-only for now to protect company email/contact data unless necessary.
-router.get('/', verifyToken, authorizeRoles('admin'), async (req, res) => {
+// GET all companies (PUBLICLY ACCESSIBLE)
+router.get('/', async (req, res) => { // Removed verifyToken and authorizeRoles
   try {
-    const companies = await Company.find();
-    res.json(companies.map(company => {
-      const companyObj = company.toObject();
-      delete companyObj.password; // Exclude password for security
-      return companyObj;
-    }));
+    const companies = await Company.find().select('-password -email -contactPhone'); // Exclude sensitive fields for public view
+    res.json(companies);
   } catch (err) {
     res.status(500).json({ message: err.message });
   }
 });
 
-// GET one company by ID (Admin or Company's own profile)
-router.get('/:id', verifyToken, getCompany, (req, res) => {
-  // Allow admin to view any profile, or company to view their own
-  if (req.user.role === 'admin' || (req.user.isCompany && req.user.id === res.company._id.toString())) {
-    const companyResponse = res.company.toObject();
-    delete companyResponse.password; // Exclude password for security
-    res.json(companyResponse);
-  } else {
-    res.status(403).json({ message: 'Access denied. You can only view your own company profile.' });
-  }
+// GET one company by ID (PUBLICLY ACCESSIBLE, but sensitive data protected)
+router.get('/:id', getCompany, (req, res) => { // Removed verifyToken
+  const companyResponse = res.company.toObject();
+  delete companyResponse.password; // Always exclude password
+  // For public view, you might want to exclude contact email/phone unless logged in/authorized
+  // For now, we'll send it, but a more granular approach might be needed.
+  res.json(companyResponse);
 });
 
-// CREATE one company (typically handled by /auth/register/company)
+// CREATE one company (Handled by /auth/register/company)
 // This route is generally not exposed if you have a dedicated auth registration endpoint.
 // If you intend to have an admin create companies, you would protect it:
 /*
@@ -96,8 +88,7 @@ router.post('/', verifyToken, authorizeRoles('admin'), async (req, res) => {
 });
 */
 
-// UPDATE one company (Admin or Company's own profile)
-// Allows partial updates using PATCH
+// UPDATE one company (Admin or Company's own profile - PROTECTED)
 router.patch('/:id', verifyToken, getCompany, async (req, res) => {
   // Only admin can update any profile, or company can update their own
   if (req.user.role !== 'admin' && (!req.user.isCompany || req.user.id !== res.company._id.toString())) {
@@ -113,8 +104,7 @@ router.patch('/:id', verifyToken, getCompany, async (req, res) => {
   // Update fields only if they are provided in the request body
   if (email != null) res.company.email = email;
   if (password != null) {
-      // Hashing is handled by the pre-save hook in the Company model
-      res.company.password = password;
+      res.company.password = password; // Hashing is handled by pre-save hook
   }
   if (companyName != null) res.company.companyName = companyName;
   if (industry != null) res.company.industry = industry;
@@ -147,7 +137,7 @@ router.patch('/:id', verifyToken, getCompany, async (req, res) => {
   }
 });
 
-// DELETE one company (Admin only, or Company's own profile - use with caution!)
+// DELETE one company (Admin or Company's own profile - PROTECTED)
 router.delete('/:id', verifyToken, getCompany, async (req, res) => {
   // Only admin can delete any company, or company can delete their own
   if (req.user.role !== 'admin' && (!req.user.isCompany || req.user.id !== res.company._id.toString())) {
@@ -163,6 +153,3 @@ router.delete('/:id', verifyToken, getCompany, async (req, res) => {
 });
 
 export default router;
-
-// User should able to browse companies without authentication, but CRUD operations should be protected.
-// If you want to allow public browsing, you can create a separate route without verifyToken.

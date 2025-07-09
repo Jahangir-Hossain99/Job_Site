@@ -1,9 +1,11 @@
 // models/Company.js
 import mongoose from 'mongoose';
 import bcrypt from 'bcrypt';
+// No need to import Job here, we'll use this.model('Job')
 
 const companySchema = new mongoose.Schema({
-    email: { // Main contact email for the company account
+    // ... (existing schema properties) ...
+    email: {
         type: String,
         required: true,
         unique: true,
@@ -19,13 +21,13 @@ const companySchema = new mongoose.Schema({
     role: {
         type: String,
         required: true,
-        enum: ['company', 'admin'], // Roles for Company model (though admin would usually be in User model)
+        enum: ['company', 'admin'],
         default: 'company'
     },
     companyName: {
         type: String,
         required: true,
-        unique: true, // Ensures unique company names
+        unique: true,
         trim: true,
         minlength: [2, 'Company name must be at least 2 characters long']
     },
@@ -42,12 +44,16 @@ const companySchema = new mongoose.Schema({
         trim: true,
         maxlength: [1000, 'Description cannot exceed 1000 characters']
     },
-    location: {
+    headquarters: {
         type: String,
         trim: true,
     },
     logoUrl: {
-        type: String, // URL to the company logo
+        type: String,
+        trim: true,
+    },
+    contactPerson: {
+        type: String,
         trim: true,
     },
     contactPhone: {
@@ -58,7 +64,7 @@ const companySchema = new mongoose.Schema({
         type: Date,
         default: Date.now
     },
-    isVerified: { // For company verification (e.g., by admin)
+    isVerified: {
         type: Boolean,
         default: false
     }
@@ -66,7 +72,7 @@ const companySchema = new mongoose.Schema({
     timestamps: true
 });
 
-// Pre-save hook for password hashing
+// Pre-save hook for password hashing (already present)
 companySchema.pre('save', async function(next) {
     if (this.isModified('password')) {
         this.password = await bcrypt.hash(this.password, 10);
@@ -74,9 +80,17 @@ companySchema.pre('save', async function(next) {
     next();
 });
 
-// Method to compare password (for login)
+// Method to compare password (for login) (already present)
 companySchema.methods.comparePassword = async function(candidatePassword) {
     return bcrypt.compare(candidatePassword, this.password);
 };
+
+// --- NEW: Pre-delete hook for cascading deletes ---
+companySchema.pre('deleteOne', { document: true, query: false }, async function(next) {
+    console.log(`Deleting all jobs for company: ${this._id}`);
+    // Delete all jobs posted by this company
+    await this.model('Job').deleteMany({ company: this._id });
+    next();
+});
 
 export default mongoose.model('Company', companySchema);
