@@ -4,45 +4,62 @@ import mongoose from 'mongoose';
 const applicationSchema = new mongoose.Schema({
     job: {
         type: mongoose.Schema.Types.ObjectId,
-        ref: 'Job', // Reference to the Job document being applied for
-        required: true,
-        index: true
+        ref: 'Job',
+        required: true
     },
     jobSeeker: {
         type: mongoose.Schema.Types.ObjectId,
-        ref: 'User', // Reference to the Job Seeker (User) who applied
-        required: true,
-        index: true
+        ref: 'User',
+        required: true
     },
-    company: { // Denormalized, derived from the Job's company field
+    company: { // Storing company ID directly for easy access/filtering
         type: mongoose.Schema.Types.ObjectId,
         ref: 'Company',
-        required: true,
-        index: true
+        required: true
     },
     status: {
         type: String,
-        enum: ['pending', 'reviewed', 'interview_scheduled', 'offered', 'rejected', 'withdrawn'],
-        default: 'pending',
-        index: true
+        enum: ['pending', 'reviewed', 'interview_scheduled', 'offered', 'rejected', 'withdrawn', 'hired'],
+        default: 'pending'
     },
     appliedAt: {
         type: Date,
         default: Date.now
     },
-    resumeSnapshotUrl: {
-        type: String, // URL to the resume version submitted for this job
+    resumeSnapshotUrl: { // URL to the resume submitted for this specific application
+        type: String,
+        trim: true
     },
-    coverLetterSnapshotUrl: {
-        type: String, // URL to the cover letter version submitted for this job
+    coverLetterSnapshotUrl: { // URL to the cover letter submitted for this specific application
+        type: String,
+        trim: true
     },
-    interviewScheduledAt: { type: Date },
-    interviewLink: { type: String },
-}, {
-    timestamps: true
-});
+    interviewScheduledAt: {
+        type: Date
+    },
+    interviewLink: {
+        type: String,
+        trim: true
+    },
+    // AI Integration Fields
+    aiScreeningScore: { // AI's confidence score for this candidate's fit for the job
+        type: Number,
+        min: 0,
+        max: 1,
+        default: null
+    },
+    aiScreeningReasons: { // Reasons/keywords from AI for the score
+        type: [String],
+        default: []
+    },
+    aiInterviewAssessment: { // AI's summary/assessment of interview performance (if applicable)
+        type: String,
+        trim: true
+    }
+}, { timestamps: true });
 
-// Ensure a job seeker can only apply to a specific job once
-applicationSchema.index({ job: 1, jobSeeker: 1 }, { unique: true });
+// Compound unique index to prevent a job seeker from applying to the same job twice
+applicationSchema.index({ jobSeeker: 1, job: 1 }, { unique: true });
 
-export default mongoose.model('Application', applicationSchema);
+const Application = mongoose.model('Application', applicationSchema);
+export default Application;
