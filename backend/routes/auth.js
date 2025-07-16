@@ -119,12 +119,12 @@ router.post('/login', async (req, res) => {
     let isCompany = false;
 
     // Try to find in User model
-    entity = await User.findOne({ email });
+    entity = await User.findOne({ email }).select('+password');
     if (entity) {
         isCompany = false;
     } else {
         // If not found in User, try to find in Company model
-        entity = await Company.findOne({ email });
+        entity = await Company.findOne({ email }).select('+password');;
         if (entity) {
             isCompany = true;
         }

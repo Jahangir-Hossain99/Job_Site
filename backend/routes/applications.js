@@ -30,7 +30,7 @@ router.get('/', verifyToken, authorizeRoles('admin'), async (req, res) => {
     try {
         const applications = await Application.find()
             .populate('job', 'title')
-            .populate('jobSeeker', 'fullName email')
+            .populate('jobSeeker', 'fullName email') // This should be User not jobSeeker
             .populate('company', 'companyName');
         res.json(applications);
     } catch (err) {

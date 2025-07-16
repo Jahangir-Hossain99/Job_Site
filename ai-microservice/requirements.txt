@@ -1,0 +1,7 @@
+Flask
+numpy
+pandas
+scikit-learn
+nltk
+python-dotenv # For loading .env variables in Python
+pymongo       # If you decide to connect to MongoDB directly from AI servicecde..
