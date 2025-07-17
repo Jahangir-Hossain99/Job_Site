@@ -1,48 +1,49 @@
-import React, { useState } from 'react';
-import { useNavigate, Link } from 'react-router-dom'; 
-import api from '../api/apiClient'; // Import your API client
+import React, { useState, useContext } from 'react'; // Import useContext
+import { useNavigate, Link } from 'react-router-dom';
+import api from '../api/apiClient';
+import { AuthContext } from '../App'; // Import AuthContext from App.jsx
 
 const LoginPage = () => {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
-  const navigate = useNavigate(); // Hook for navigation
+  const navigate = useNavigate();
+  const { setCurrentUser } = useContext(AuthContext); // Use setCurrentUser from context
 
   const handleSubmit = async (e) => {
-    e.preventDefault(); // Prevent default form submission
+    e.preventDefault();
     setLoading(true);
     setError(null);
 
     try {
       const response = await api.login({ email, password });
       
-      // Assuming your backend returns { token, entity: { _id, role, ... } }
       const { token, entity } = response.data;
 
-      // Store token and user/company info in localStorage
       localStorage.setItem('token', token);
-      localStorage.setItem('user', JSON.stringify(entity)); // Store user/company object
+      localStorage.setItem('user', JSON.stringify(entity));
+      
+      setCurrentUser(entity); // --- CRITICAL: Update global state via context ---
 
       console.log('Login successful:', entity);
 
-      // Redirect based on user role
       if (entity.role === 'jobseeker') {
-        navigate('/profile'); // Redirect to job seeker profile dashboard
+        navigate('/profile');
       } else if (entity.role === 'company') {
-        navigate('/company-dashboard'); // Redirect to company dashboard
+        navigate('/company-dashboard');
       } else if (entity.role === 'admin') {
-        navigate('/admin-dashboard'); // Redirect to admin dashboard (if you build one)
+        navigate('/admin-dashboard');
       } else {
-        navigate('/'); // Default redirect
+        navigate('/');
       }
 
     } catch (err) {
       console.error('Login error:', err);
       if (err.response && err.response.data && err.response.data.message) {
-        setError(err.response.data.message); // Display backend error message
+        setError(err.response.data.message);
       } else {
-        setError('Login failed. Please check your credentials.'); // Generic error
+        setError('Login failed. Please check your credentials.');
       }
     } finally {
       setLoading(false);

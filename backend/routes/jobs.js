@@ -1,14 +1,18 @@
-// routes/jobs.js
+// backend/routes/jobs.js
 import express from 'express';
 const router = express.Router();
 import mongoose from 'mongoose';
-import Job from '../models/Job.js';
-import User from '../models/User.js'; // Needed to fetch user profile for recommendations
-import Company from '../models/Company.js';
-import { verifyToken, authorizeRoles, authorizeOwner } from '../utils/auth.js';
-import aiApiClient from '../utils/aiApiClient.js'; // Import the AI API client
+import jwt from 'jsonwebtoken'; // Import jwt for getJobById's AI notification
 
+import Job from '../models/Job.js';
+import User from '../models/User.js'; // For AI recommendations
+import Company from '../models/Company.js'; // For populating company data in jobs and AI logic
+import { verifyToken, authorizeRoles } from '../utils/auth.js';
+import aiApiClient from '../utils/aiApiClient.js'; // AI service client
+
+// Helper for consistent Mongoose validation errors
 const handleMongooseError = (res, err) => {
+    console.error("Mongoose Error:", err); // Log the full error for debugging
     if (err.name === 'ValidationError') {
         let errors = {};
         for (let field in err.errors) {
@@ -16,379 +20,284 @@ const handleMongooseError = (res, err) => {
         }
         return res.status(400).json({ message: 'Validation failed', errors });
     }
-    if (err.code === 11000) {
-      return res.status(409).json({ message: 'Duplicate key error' });
+    if (err.code === 11000) { // Duplicate key error
+        const field = Object.keys(err.keyValue)[0];
+        return res.status(409).json({ message: `Duplicate field value: ${field} already exists.` });
     }
-    res.status(500).json({ message: err.message });
+    res.status(500).json({ message: err.message || 'Server error' });
 };
-
 
 // --- ROUTES ---
 
-// GET all jobs (PUBLICLY ACCESSIBLE) - For general Browse
-router.get('/', async (req, res) => {
-  try {
-    let query = { status: 'active' }; // Default to 'active' jobs for public view
-
-    // Implement more sophisticated filtering here if needed (e.g., from query params)
-    // const { location, jobType, keywords, seniorityLevel, industry, companySize } = req.query;
-    // if (location) query.location = new RegExp(location, 'i');
-    // if (jobType) query.jobType = jobType;
-    // if (keywords) query.requiredSkills = { $in: keywords.split(',').map(k => new RegExp(k.trim(), 'i')) };
-    // if (seniorityLevel) query.seniorityLevel = seniorityLevel;
-    // if (industry) query.industry = new RegExp(industry, 'i');
-    // if (companySize) query.companySize = companySize;
-
-    const jobs = await Job.find(query)
-        .populate('company', 'companyName headquarters logoUrl')
-        .sort({ createdAt: -1 });
-
-    res.json(jobs);
-  } catch (err) {
-    res.status(500).json({ message: err.message });
-  }
-});
-
-// GET all jobs (Admin only) - For full administrative control over all jobs/statuses
-router.get('/admin', verifyToken, authorizeRoles('admin'), async (req, res) => {
-  try {
-    // Admin can view all jobs regardless of status
-    let query = {};
-    // Admin can also filter by status if a query param is provided
-    if (req.query.status) {
-        query.status = req.query.status;
-    }
-    // Admin can apply other filters as well
-    // const { location, jobType, keywords, isFlagged, seniorityLevel, industry } = req.query;
-    // if (location) query.location = new RegExp(location, 'i');
-    // if (jobType) query.jobType = jobType;
-    // if (keywords) query.requiredSkills = { $in: keywords.split(',').map(k => new RegExp(k.trim(), 'i')) };
-    // if (isFlagged != null) query.isFlagged = isFlagged;
-    // if (seniorityLevel) query.seniorityLevel = seniorityLevel;
-    // if (industry) query.industry = new RegExp(industry, 'i');
-
-    const jobs = await Job.find(query)
-        .populate('company', 'companyName headquarters logoUrl email contactPerson contactPhone') // Admin gets more company details
-        .sort({ createdAt: -1 });
-
-    res.json(jobs);
-  } catch (err) {
-    res.status(500).json({ message: err.message });
-  }
-});
-
-// --- NEW AI-POWERED ROUTE ---
-// GET AI-powered job recommendations for a job seeker
-router.get('/recommended', verifyToken, authorizeRoles('jobseeker'), async (req, res) => {
+// @route   POST /jobs
+// @desc    Create a new job posting
+// @access  Private (Company, Admin)
+router.post('/', verifyToken, authorizeRoles('company', 'admin'), async (req, res) => {
     try {
-        const userId = req.user.id;
+        const { user } = req; // Authenticated user from JWT payload
+        
+        let companyIdToAssociate;
 
-        // Fetch the user's detailed profile for AI input
-        const userProfile = await User.findById(userId)
-            .select('-password -aiProfileVector -lastRecommendedJobs') // Exclude AI internal fields
-            .lean(); // Use .lean() for plain JS object
-        if (!userProfile) {
-            return res.status(404).json({ message: 'User profile not found. Cannot generate recommendations.' });
+        if (user.role === 'company') {
+            // If the authenticated user is a company, the job is for *their* company.
+            companyIdToAssociate = user.id;
+        } else { // user.role === 'admin'
+            // If the authenticated user is an admin, they must explicitly provide the company ID in the request body.
+            if (!req.body.company) {
+                 return res.status(400).json({ message: 'Admin must specify a company ID in the request body to post a job.' });
+            }
+            companyIdToAssociate = req.body.company;
+            // Validate if the provided companyIdToAssociate is a valid Company
+            const companyExists = await Company.findById(companyIdToAssociate);
+            if (!companyExists) {
+                return res.status(400).json({ message: 'Invalid company ID provided by admin for job posting.' });
+            }
         }
 
-        // Fetch user's recent activity for AI (e.g., jobs viewed, applied to)
-        // This is a placeholder. You might fetch from a separate activity log if implemented.
-        const recentActivity = []; // For now, an empty array. Populate with real activity later if desired.
-
-        // Call the AI service for job recommendations
-        const aiRecommendations = await aiApiClient.recommendJobs({
-            userId: userId,
-            userProfile: userProfile,
-            recentActivity: recentActivity // Pass recent interaction data
+        // Create new job instance
+        const newJob = new Job({
+            ...req.body, // Take all other fields from the request body
+            company: companyIdToAssociate, // Assign the determined company ID
+            postedBy: user.id, // Record who actually posted it (the user's ID)
+            status: req.body.status || 'pending_review' // Default status if not provided
         });
 
-        if (!aiRecommendations || aiRecommendations.length === 0) {
-            return res.json({ message: 'No personalized recommendations available at this time. Showing general jobs.', jobs: [] });
+        // AI Scam Detection (before saving)
+        try {
+            const companyDetailsForAI = await Company.findById(companyIdToAssociate);
+            const companyNameForAI = companyDetailsForAI ? companyDetailsForAI.companyName : 'Unknown Company';
+
+            const scamDetectionResult = await aiApiClient.detectScam({
+                jobTitle: newJob.title,
+                jobDescription: newJob.description,
+                companyName: companyNameForAI
+            });
+
+            if (scamDetectionResult.isSuspicious) {
+                newJob.status = 'flagged'; // Set status to flagged if suspicious
+                newJob.aiScamFlags = scamDetectionResult.flags; // Store flags
+                console.warn(`Job flagged as suspicious: ${newJob.title}. Flags: ${scamDetectionResult.flags.join(', ')}`);
+            } else {
+                newJob.status = req.body.status || 'active'; // Use provided status or default to active
+            }
+        } catch (aiError) {
+            console.error("AI Scam Detection failed:", aiError.message);
+            // Don't block job creation if AI service is down, but log it
+            newJob.status = req.body.status || 'active'; // Default to active if AI fails
         }
 
-        // Extract job IDs from AI response and sort them by score
-        const recommendedJobIds = aiRecommendations
-            .sort((a, b) => b.score - a.score) // Sort by score descending
-            .map(rec => rec.jobId);
+        await newJob.save();
 
-        // Fetch full job details for recommended jobs from your DB, maintaining order
-        const recommendedJobs = await Job.find({ _id: { $in: recommendedJobIds }, status: 'active' })
-            .populate('company', 'companyName headquarters logoUrl');
-
-        // Reorder jobs based on AI's scores
-        const orderedJobs = recommendedJobIds.map(id =>
-            recommendedJobs.find(job => job._id.toString() === id)
-        ).filter(job => job != null); // Filter out nulls if some jobs were not found/active
-
-        // Update user's lastRecommendedJobs in the background
-        // Limit to N most recent recommendations to avoid unbounded growth
-        const updateUserData = aiRecommendations.map(rec => ({
-            job: rec.jobId,
-            score: rec.score,
-            date: new Date()
-        })).slice(0, 10); // Store last 10 recommendations
-
-        await User.findByIdAndUpdate(userId, {
-            $set: { lastRecommendedJobs: updateUserData }
-        }, { new: true }).catch(err => console.error('Error updating user lastRecommendedJobs:', err.message));
-
-
-        res.json(orderedJobs);
+        res.status(201).json({ message: 'Job posting created successfully!', job: newJob });
 
     } catch (err) {
-        console.error('Error fetching AI recommended jobs:', err);
-        // Fallback or provide a user-friendly message
-        res.status(500).json({ message: 'Failed to retrieve personalized job recommendations. Please try again later.', error: err.message });
+        handleMongooseError(res, err);
+    }
+});
+
+// @route   GET /jobs
+// @desc    Get all active job postings (public)
+// @access  Public
+router.get('/', async (req, res) => {
+    try {
+        const jobs = await Job.find({ status: 'active' }).populate('company', 'companyName logoUrl industry').sort({ createdAt: -1 });
+        res.status(200).json(jobs);
+    } catch (err) {
+        handleMongooseError(res, err);
+    }
+});
+
+// @route   GET /jobs/admin
+// @desc    Get all job postings (for admin dashboard, with optional status filter)
+// @access  Private (Admin)
+router.get('/admin', verifyToken, authorizeRoles('admin'), async (req, res) => {
+    try {
+        const { status } = req.query;
+        let query = {};
+        if (status) {
+            query.status = status;
+        }
+        const jobs = await Job.find(query).populate('company', 'companyName logoUrl industry').sort({ createdAt: -1 });
+        res.status(200).json(jobs);
+    } catch (err) {
+        handleMongooseError(res, err);
+    }
+});
+
+// @route   GET /jobs/:id
+// @desc    Get a single job posting by ID, and increment view count
+// @access  Public
+router.get('/:id', async (req, res) => {
+    try {
+        const { id } = req.params;
+        if (!mongoose.Types.ObjectId.isValid(id)) {
+            return res.status(400).json({ message: 'Invalid job ID format.' });
+        }
+
+        const job = await Job.findByIdAndUpdate(
+            id,
+            { $inc: { viewsCount: 1 } }, // Increment viewsCount
+            { new: true } // Return the updated document
+        ).populate('company', 'companyName logoUrl description headquarters website industry contactPerson contactPhone');
+
+        if (!job) {
+            return res.status(404).json({ message: 'Job posting not found.' });
+        }
+
+        // Notify AI service about job view
+        const token = req.headers.authorization?.split(' ')[1];
+        if (token) { // Only notify if a user is logged in
+            try {
+                const decoded = jwt.verify(token, process.env.JWT_SECRET);
+                if (decoded.role === 'jobseeker') { // Only track jobseeker views for recommendations
+                    aiApiClient.notifyJobInteraction({
+                        userId: decoded.id,
+                        jobId: job._id.toString(),
+                        type: 'view'
+                    });
+                }
+            } catch (jwtError) {
+                console.warn("JWT verification failed for AI interaction notification:", jwtError.message);
+            }
+        }
+
+        res.status(200).json(job);
+    } catch (err) {
+        handleMongooseError(res, err);
+    }
+});
+
+// @route   PATCH /jobs/:id/view
+// @desc    Explicitly increment job view count (for frontend tracking)
+// @access  Public (can be called by frontend without auth)
+router.patch('/:id/view', async (req, res) => {
+    try {
+        const { id } = req.params;
+        if (!mongoose.Types.ObjectId.isValid(id)) {
+            return res.status(400).json({ message: 'Invalid job ID format.' });
+        }
+
+        const job = await Job.findByIdAndUpdate(
+            id,
+            { $inc: { viewsCount: 1 } },
+            { new: true, select: 'viewsCount' } // Return only viewsCount
+        );
+
+        if (!job) {
+            return res.status(404).json({ message: 'Job posting not found.' });
+        }
+
+        res.status(200).json({ message: 'View count incremented.', viewsCount: job.viewsCount });
+    } catch (err) {
+        handleMongooseError(res, err);
     }
 });
 
 
-// GET one job by ID (Public)
-// This public route still needs to fetch the job. authorizeOwner is for *protected* routes.
-// The fetching logic is intentionally replicated here for clarity, as it's a public endpoint
-// and authorizeOwner also includes authorization checks which are not desired for public access.
-router.get('/:id', async (req, res, next) => {
-  let job;
-  try {
-    if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
-        return res.status(400).json({ message: 'Invalid Job ID format' });
-    }
-    job = await Job.findById(req.params.id); // Fetch full job to increment views
-    if (job == null) {
-      return res.status(404).json({ message: 'Cannot find job' });
-    }
-  } catch (err) {
-    return res.status(500).json({ message: err.message });
-  }
-  res.job = job; // Attach for next middleware/handler
-  next();
-}, async (req, res) => {
-  try {
-    res.job.viewsCount = (res.job.viewsCount || 0) + 1;
-    await res.job.save();
+// @route   PATCH /jobs/:id
+// @desc    Update a job posting
+// @access  Private (Company owner, Admin)
+router.patch('/:id', verifyToken, authorizeRoles('company', 'admin'), async (req, res) => {
+    try {
+        const { id } = req.params;
+        const { user } = req; // Authenticated user from JWT payload
 
-    // --- AI INTEGRATION: Notify AI service about job view interaction ---
-    if (req.user && req.user.role === 'jobseeker') { // Only track if it's a logged-in job seeker
-        aiApiClient.notifyJobInteraction({
-            userId: req.user.id,
-            jobId: res.job._id.toString(),
-            type: 'view' // Type of interaction
-        })
-        .then(response => console.log('AI Job view interaction notified successfully.'))
-        .catch(error => console.error('Failed to notify AI of job view interaction:', error.message));
-    }
-    // ------------------------------------------------------------------
+        if (!mongoose.Types.ObjectId.isValid(id)) {
+            return res.status(400).json({ message: 'Invalid job ID format.' });
+        }
 
-    const job = await res.job.populate('company', 'companyName headquarters logoUrl description website contactPerson contactPhone');
-    res.json(job);
-  } catch (err) {
-    res.status(500).json({ message: err.message });
-  }
+        const job = await Job.findById(id);
+        if (!job) {
+            return res.status(404).json({ message: 'Job posting not found.' });
+        }
+
+        // Authorization check: Only owner company or admin can update
+        if (user.role === 'company' && job.company.toString() !== user.id) {
+            return res.status(403).json({ message: 'Access denied. You can only update jobs for your own company.' });
+        }
+        if (user.role !== 'company' && user.role !== 'admin') {
+            return res.status(403).json({ message: 'Forbidden: Only companies or admins can update job postings.' });
+        }
+
+        // Prevent direct modification of 'company' field by non-admin users
+        if (user.role !== 'admin' && req.body.company && req.body.company !== job.company.toString()) {
+            return res.status(403).json({ message: 'Forbidden: Companies cannot change the associated company of a job.' });
+        }
+
+        const updatedJob = await Job.findByIdAndUpdate(id, req.body, { new: true, runValidators: true }).populate('company', 'companyName');
+
+        res.status(200).json({ message: 'Job posting updated successfully!', job: updatedJob });
+
+    } catch (err) {
+        handleMongooseError(res, err);
+    }
 });
 
-// CREATE one job (Company role required)
-router.post('/', verifyToken, authorizeRoles('company', 'admin'), async (req, res) => {
-  const {
-    company, title, description, location, jobType, salaryRange,
-    requirements, responsibilities, benefits, applicationDeadline,
-    status, isFlagged, flagReason,
-    requiredSkills, preferredSkills, technologiesUsed, seniorityLevel, industry,
-    companySize, workEnvironment
-  } = req.body;
+// @route   DELETE /jobs/:id
+// @desc    Delete a job posting
+// @access  Private (Company owner, Admin)
+router.delete('/:id', verifyToken, authorizeRoles('company', 'admin'), async (req, res) => {
+    try {
+        const { id } = req.params;
+        const { user } = req; // Authenticated user from JWT payload
 
-  // If a company is posting, ensure the 'company' field matches their own ID
-  if (req.user.role === 'company' && company !== req.user.id) {
-      return res.status(403).json({ message: 'Access denied. You can only post jobs for your own company.' });
-  }
-  // For admin, the 'company' field must be provided and valid
-  if (req.user.role === 'admin' && !company) {
-    return res.status(400).json({ message: 'Admin must specify a company ID for the job.' });
-  }
+        if (!mongoose.Types.ObjectId.isValid(id)) {
+            return res.status(400).json({ message: 'Invalid job ID format.' });
+        }
 
-  // Basic validation for company ObjectId existence
-  if (!mongoose.Types.ObjectId.isValid(company)) {
-    return res.status(400).json({ message: 'Invalid Company ID format.' });
-  }
-  const existingCompany = await Company.findById(company);
-  if (!existingCompany) {
-    return res.status(400).json({ message: 'Company not found.' });
-  }
+        const job = await Job.findById(id);
+        if (!job) {
+            return res.status(404).json({ message: 'Job posting not found.' });
+        }
 
-  if (applicationDeadline) {
-    const deadlineDate = new Date(applicationDeadline);
-    if (isNaN(deadlineDate.getTime())) {
-      return res.status(400).json({ message: 'Invalid application deadline date format.' });
+        // Authorization check: Only owner company or admin can delete
+        if (user.role === 'company' && job.company.toString() !== user.id) {
+            return res.status(403).json({ message: 'Access denied. You can only delete jobs for your own company.' });
+        }
+        if (user.role !== 'company' && user.role !== 'admin') {
+            return res.status(403).json({ message: 'Forbidden: Only companies or admins can delete job postings.' });
+        }
+
+        await Job.findByIdAndDelete(id);
+
+        res.status(200).json({ message: 'Job posting deleted successfully!' });
+
+    } catch (err) {
+        handleMongooseError(res, err);
     }
-    if (deadlineDate < new Date()) {
-      return res.status(400).json({ message: 'Application deadline must be in the future.' });
-    }
-  }
-
-  const job = new Job({
-    company, title, description, location, jobType, salaryRange,
-    requirements, responsibilities, benefits, applicationDeadline,
-    status: status || 'pending_review', // Default to pending review for new jobs
-    isFlagged: isFlagged || false,
-    flagReason: flagReason || '',
-    requiredSkills, preferredSkills, technologiesUsed, seniorityLevel, industry,
-    companySize, workEnvironment
-  });
-
-  try {
-    // --- AI INTEGRATION: Scam Detection before saving ---
-    const scamDetectionResult = await aiApiClient.detectScam({
-        jobTitle: title,
-        jobDescription: description,
-        companyName: existingCompany.companyName // Use the fetched company name
-    });
-
-    if (scamDetectionResult.isSuspicious) {
-        job.isFlagged = true;
-        job.flagReason = `AI Flagged: ${scamDetectionResult.flags.join(', ')} (Score: ${scamDetectionResult.score.toFixed(2)})`;
-        job.status = 'pending_review'; // Force pending review if AI flags it
-        console.warn(`Job ${job.title} from ${existingCompany.companyName} flagged by AI for: ${job.flagReason}`);
-    }
-    // ---------------------------------------------------
-
-    const newJob = await job.save();
-    const populatedJob = await newJob.populate('company', 'companyName headquarters logoUrl');
-    res.status(201).json(populatedJob);
-  } catch (err) {
-    handleMongooseError(res, err);
-  }
 });
 
-// UPDATE one job (Admin or owner company required)
-// authorizeOwner(Job, 'company') will fetch the job and attach it to res.job,
-// then check if the authenticated company owns this job, or if they are admin.
-router.patch('/:id', verifyToken, authorizeRoles('company', 'admin'), authorizeOwner(Job, 'company'), async (req, res) => {
-  const {
-    company, title, description, location, jobType, salaryRange,
-    requirements, responsibilities, benefits, applicationDeadline,
-    status, viewsCount, isFlagged, flagReason,
-    requiredSkills, preferredSkills, technologiesUsed, seniorityLevel, industry,
-    companySize, workEnvironment
-  } = req.body;
+// @route   GET /jobs/recommended
+// @desc    Get AI-powered personalized job recommendations for a job seeker
+// @access  Private (Job Seeker)
+router.get('/recommended', verifyToken, authorizeRoles('jobseeker'), async (req, res) => {
+    try {
+        const { user } = req; // Authenticated user from JWT payload
 
-  // Prevent changing the associated company of a job after creation
-  if (company != null && company.toString() !== res.job.company.toString()) {
-      return res.status(403).json({ message: 'Changing the company for a job is not allowed.' });
-  }
+        if (user.role !== 'jobseeker') {
+            return res.status(403).json({ message: 'Forbidden: Only job seekers can get personalized job recommendations.' });
+        }
 
-  if (title != null) res.job.title = title;
-  if (description != null) res.job.description = description;
-  if (location != null) res.job.location = location;
-  if (jobType != null) res.job.jobType = jobType;
-  if (salaryRange != null) res.job.salaryRange = salaryRange;
-  if (requirements != null) res.job.requirements = requirements;
-  if (responsibilities != null) res.job.responsibilities = responsibilities;
-  if (benefits != null) res.job.benefits = benefits;
+        const userProfile = await User.findById(user.id).lean(); // Fetch full user profile
+        if (!userProfile) {
+            return res.status(404).json({ message: 'User profile not found for recommendations.' });
+        }
 
-  // New Job Fields
-  if (requiredSkills != null) res.job.requiredSkills = requiredSkills;
-  if (preferredSkills != null) res.job.preferredSkills = preferredSkills;
-  if (technologiesUsed != null) res.job.technologiesUsed = technologiesUsed;
-  if (seniorityLevel != null) res.job.seniorityLevel = seniorityLevel;
-  if (industry != null) res.job.industry = industry;
-  if (companySize != null) res.job.companySize = companySize;
-  if (workEnvironment != null) res.job.workEnvironment = workEnvironment;
+        // Call AI microservice for recommendations
+        const aiRecommendations = await aiApiClient.recommendJobs({
+            userId: user.id,
+            userProfile: userProfile // Pass the full user profile
+        });
 
+        // The AI service returns an array of job objects (or dummy ones)
+        // We just pass them through to the frontend.
+        res.status(200).json(aiRecommendations);
 
-  if (applicationDeadline != null) {
-    const newDeadline = new Date(applicationDeadline);
-    if (isNaN(newDeadline.getTime())) {
-      return res.status(400).json({ message: 'Invalid application deadline date' });
+    } catch (err) {
+        console.error("Error fetching AI recommended jobs:", err);
+        // If AI service fails, return an empty array or a fallback message
+        res.status(500).json({ message: 'Failed to get job recommendations from AI service. Please try again later.', jobs: [] });
     }
-    if (newDeadline < new Date()) {
-      return res.status(400).json({ message: 'Application deadline must be in the future' });
-    }
-    res.job.applicationDeadline = newDeadline;
-  }
-
-  // Admin and Company can change status
-  if (status != null && (req.user.role === 'admin' || req.user.role === 'company')) {
-    res.job.status = status;
-  } else if (status != null && req.user.role !== 'admin' && req.user.role !== 'company') {
-      return res.status(403).json({ message: 'Access denied. You cannot change job status.' });
-  }
-
-  // isFlagged and flagReason are usually admin-only, or set by AI
-  if (isFlagged != null && req.user.role === 'admin') {
-      res.job.isFlagged = isFlagged;
-  } else if (isFlagged != null && req.user.role !== 'admin') {
-      return res.status(403).json({ message: 'Access denied. Only admin can flag jobs.' });
-  }
-  if (flagReason != null && req.user.role === 'admin') {
-      res.job.flagReason = flagReason;
-  } else if (flagReason != null && req.user.role !== 'admin') {
-      return res.status(403).json({ message: 'Access denied. Only admin can set flag reasons.' });
-  }
-  // viewsCount should not be directly updatable via PATCH by client
-
-  try {
-    const updatedJob = await res.job.save();
-    const populatedJob = await updatedJob.populate('company', 'companyName headquarters logoUrl');
-    res.json(populatedJob);
-  } catch (err) {
-    handleMongooseError(res, err);
-  }
-});
-
-// DELETE one job (Admin or owner company required)
-// authorizeOwner(Job, 'company') will fetch the job and attach it to res.job
-router.delete('/:id', verifyToken, authorizeRoles('company', 'admin'), authorizeOwner(Job, 'company'), async (req, res) => {
-  try {
-    await res.job.deleteOne(); // This will trigger the pre('deleteOne') hook in Job model
-    res.json({ message: 'Deleted job successfully' });
-  } catch (err) {
-    res.status(500).json({ message: err.message });
-  }
-});
-
-// PATCH to increment viewsCount (Public - can be used from client side)
-// OBSERVED: Replicated getJob logic from GET /:id. This is acceptable for clarity
-// on public routes where authorizeOwner (with its auth checks) is not suitable.
-// OBSERVED: No verifyToken or authorizeRoles. This allows anonymous users to increment
-// view counts. This is common for public job boards but means bots could inflate numbers.
-// If unique or authenticated views are required, a more sophisticated mechanism would be needed.
-router.patch('/:id/view', async (req, res, next) => {
-  let job;
-  try {
-    if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
-        return res.status(400).json({ message: 'Invalid Job ID format' });
-    }
-    job = await Job.findById(req.params.id);
-    if (job == null) {
-      return res.status(404).json({ message: 'Cannot find job' });
-    }
-  } catch (err) {
-    return res.status(500).json({ message: err.message });
-  }
-  res.job = job; // Attach for next middleware/handler
-  next();
-}, async (req, res) => {
-  try {
-    res.job.viewsCount = (res.job.viewsCount || 0) + 1;
-    await res.job.save();
-
-    // --- AI INTEGRATION: Notify AI service about job view interaction (even for public views) ---
-    // If you want to track anonymous views, you might need to send IP or a session ID.
-    // For now, only send if a job seeker is logged in for personalized tracking.
-    if (req.user && req.user.role === 'jobseeker') {
-        aiApiClient.notifyJobInteraction({
-            userId: req.user.id,
-            jobId: res.job._id.toString(),
-            type: 'view' // Type of interaction
-        })
-        .then(response => console.log('AI Job view interaction notified successfully via PATCH /:id/view.'))
-        .catch(error => console.error('Failed to notify AI of job view interaction via PATCH /:id/view:', error.message));
-    }
-    // ------------------------------------------------------------------------------------------
-
-    res.json({ message: 'Views count updated', viewsCount: res.job.viewsCount });
-  } catch (err) {
-    res.status(500).json({ message: err.message });
-  }
 });
 
 export default router;
